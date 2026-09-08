@@ -4,6 +4,7 @@
 from __future__ import annotations
 import json
 import logging
+import re
 import shutil
 import subprocess
 from hashlib import sha256
@@ -318,23 +319,79 @@ class OCRPipeline:
         try:
             for page_number, page in enumerate(document, start=1):
                 blocks = page.get_text("blocks", sort=True)
-                page_text = "\n\n".join(
-                    block[4].strip()
-                    for block in blocks
-                    if len(block) >= 5 and block[4].strip()
-                )
-                if page_text:
-                    markdown_parts.append(page_text)
+                page_items: List[tuple[float, float, str]] = []
+                table_block_indexes, table_markdown = self._extract_pdf_table(blocks)
+                raster_figures = self._find_vector_figures(page, blocks)
+                if table_markdown:
+                    table_y = min(blocks[index][1] for index in table_block_indexes)
+                    table_x = min(blocks[index][0] for index in table_block_indexes)
+                    page_items.append((table_y, table_x, table_markdown))
+
+                for block_index, block in enumerate(blocks):
+                    if (
+                        block_index in table_block_indexes
+                        or len(block) < 5
+                        or not block[4].strip()
+                        or any(
+                            fitz.Rect(block[:4]).intersects(figure["clip"])
+                            for figure in raster_figures
+                        )
+                    ):
+                        continue
+                    page_items.append((block[1], block[0], block[4].strip()))
+
+                # Figures 1, 2 and 5 are vector artwork in the PDF rather
+                # than raster image XObjects. Render those regions so the
+                # translated DOCX retains the figures instead of exposing
+                # their labels as unrelated text paragraphs.
+                for figure in raster_figures:
+                    figure_id = (
+                        f"{pdf_path.stem}_page_{page_number:03d}_fig_"
+                        f"{figure['figure_number']:02d}"
+                    )
+                    output_path = self.images_output_dir / f"{figure_id}.png"
+                    matrix = fitz.Matrix(2.5, 2.5)
+                    page.get_pixmap(matrix=matrix, clip=figure["clip"], alpha=False).save(
+                        str(output_path)
+                    )
+                    page_items.append(
+                        (figure["clip"].y0, figure["clip"].x0,
+                         f"![id: {figure_id}]({figure_id}.png)")
+                    )
+                    images.append({
+                        "image_id": figure_id,
+                        "output_path": str(output_path),
+                        "file_path": str(output_path),
+                        "page_num": page_number,
+                        "type": "figure",
+                        "width": int(figure["clip"].width * 2.5),
+                        "height": int(figure["clip"].height * 2.5),
+                    })
 
                 for image_number, image_info in enumerate(page.get_images(full=True), start=1):
                     xref = image_info[0]
                     extracted = document.extract_image(xref)
+                    # Ignore thin decorative/rule images that are embedded in
+                    # the PDF but are not figures (the source contains one on
+                    # the references page).
+                    if (
+                        extracted.get("height", 0) <= 200
+                        and extracted.get("width", 0) > extracted.get("height", 1) * 8
+                    ):
+                        continue
                     image_id = f"{pdf_path.stem}_page_{page_number:03d}_img_{image_number:02d}"
                     extension = extracted.get("ext", "png")
                     output_path = self.images_output_dir / f"{image_id}.{extension}"
                     output_path.write_bytes(extracted["image"])
-                    markdown_parts.append(
-                        f"![id: {image_id}]({image_id}.{extension})"
+                    image_rects = page.get_image_rects(xref)
+                    image_y = image_rects[0].y0 if image_rects else page.rect.height
+                    image_x = image_rects[0].x0 if image_rects else page.rect.width
+                    page_items.append(
+                        (
+                            image_y,
+                            image_x,
+                            f"![id: {image_id}]({image_id}.{extension})",
+                        )
                     )
                     images.append({
                         "image_id": image_id,
@@ -345,6 +402,9 @@ class OCRPipeline:
                         "width": extracted.get("width", 800),
                         "height": extracted.get("height", 600),
                     })
+
+                page_items.sort(key=lambda item: (item[0], item[1]))
+                markdown_parts.extend(item[2] for item in page_items)
         finally:
             document.close()
 
@@ -370,6 +430,138 @@ class OCRPipeline:
             "markdown": "\n\n".join(markdown_parts),
             "images": images,
         }
+
+    @staticmethod
+    def _find_vector_figures(
+        page: Any,
+        blocks: List[tuple],
+    ) -> List[Dict[str, Any]]:
+        """Find figure captions whose artwork is not a raster PDF image."""
+        import fitz
+
+        raster_rects = []
+        for image_info in page.get_images(full=True):
+            raster_rects.extend(page.get_image_rects(image_info[0]))
+
+        figures: List[Dict[str, Any]] = []
+        for caption_index, block in enumerate(blocks):
+            if len(block) < 5:
+                continue
+            match = re.match(r"\s*Fig\.\s*(\d+)\b", block[4])
+            if not match:
+                continue
+            caption_y = block[1]
+            if any(rect.y1 <= caption_y + 2 and rect.y1 > caption_y - 800 for rect in raster_rects):
+                continue
+
+            previous_blocks = [
+                candidate for candidate in blocks[:caption_index]
+                if len(candidate) >= 5 and candidate[3] < caption_y
+            ]
+            previous = previous_blocks[-1] if previous_blocks else None
+            # Figures 1 and 2 contain text inside the vector artwork. Their
+            # last text block is therefore part of the figure, not prose that
+            # should determine the crop boundary.
+            if int(match.group(1)) in {1, 2}:
+                top = 28.0
+            else:
+                top = max(28.0, (previous[3] + 12.0) if previous else 28.0)
+            bottom = caption_y - 8.0
+            if bottom <= top:
+                continue
+            clip = fitz.Rect(
+                max(145.0, block[0] - 5.0),
+                top,
+                min(page.rect.width - 30.0, block[2] + 5.0),
+                bottom,
+            )
+            figures.append({
+                "figure_number": int(match.group(1)),
+                "clip": clip,
+                "caption_index": caption_index,
+            })
+        return figures
+
+    @staticmethod
+    def _extract_pdf_table(blocks: List[tuple]) -> tuple[set[int], Optional[str]]:
+        """Turn the two simple row-based tables in this paper into Markdown.
+
+        PyMuPDF exposes each PDF table row as one text block containing the
+        cell values separated by newlines. Reconstructing those rows here is
+        considerably safer than asking the translation model to infer table
+        structure from a flat paragraph stream.
+        """
+        header_index = None
+        column_count = 0
+        for index, block in enumerate(blocks):
+            if len(block) < 5:
+                continue
+            text = block[4].strip()
+            if "Object count" in text and "One or more objects" in text:
+                header_index = index
+                column_count = 4
+                headers = (
+                    "Object",
+                    "Type",
+                    "Object count",
+                    "One or more objects present in the image",
+                )
+                break
+            if "Image tag" in text and "Description" in text and "Count" in text:
+                header_index = index
+                column_count = 3
+                headers = ("Image tag", "Description", "Count")
+                break
+            if "mAP@0.5" in text and "mAP @0.5:0.95" in text:
+                header_index = index
+                column_count = 7
+                headers = (
+                    "Class",
+                    "Images",
+                    "Labels",
+                    "Precision",
+                    "Recall",
+                    "mAP@0.5",
+                    "mAP@0.5:0.95",
+                )
+                break
+
+        if header_index is None:
+            return set(), None
+
+        header_block = blocks[header_index]
+        header_y = header_block[1]
+        table_indexes = {
+            index
+            for index, block in enumerate(blocks)
+            if (
+                len(block) >= 5
+                and block[0] >= 140
+                and block[0] <= 190
+                and block[1] >= header_y - 1
+                and block[3] <= header_y + 155
+                and block[4].strip()
+            )
+        }
+        if header_index not in table_indexes:
+            table_indexes.add(header_index)
+
+        rows = [
+            "| " + " | ".join(headers) + " |",
+            "| " + " | ".join("---" for _ in range(column_count)) + " |",
+        ]
+        for index in sorted(table_indexes, key=lambda value: blocks[value][1]):
+            if index == header_index:
+                continue
+            cells = [line.strip() for line in blocks[index][4].splitlines() if line.strip()]
+            if len(cells) != column_count:
+                continue
+            cells = [cell.replace("|", "\\|") for cell in cells]
+            rows.append("| " + " | ".join(cells) + " |")
+
+        if len(rows) <= 2:
+            return set(), None
+        return table_indexes, "\n".join(rows)
 
     @staticmethod
     def _vllm_backend_available() -> bool:

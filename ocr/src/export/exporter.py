@@ -21,7 +21,7 @@ class WordExporter:
     def center_y(box):
         return sum(p[1] for p in box) / len(box)
     
-    def add_image_to_document(self, doc, image_data):
+    def add_image_to_document(self, doc, image_data, show_id_caption=True):
         """
         Add an image to the Word document with proper formatting
         
@@ -96,15 +96,17 @@ class WordExporter:
             run = p.add_run()
             run.add_picture(str(image_path), width=Inches(width_inches))
             
-            # Add caption below image with better formatting
-            caption_p = doc.add_paragraph()
-            caption_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            caption_p.paragraph_format.space_before = Pt(3)
-            caption_p.paragraph_format.space_after = Pt(6)
-            caption_run = caption_p.add_run(f"[{image_id}]")
-            caption_run.font.size = Pt(9)
-            caption_run.font.italic = True
-            caption_run.font.color.rgb = RGBColor(100, 100, 100)
+            # Internal IDs are useful for debug/native exports, but should not
+            # appear in the reader-facing Markdown translation document.
+            if show_id_caption:
+                caption_p = doc.add_paragraph()
+                caption_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                caption_p.paragraph_format.space_before = Pt(3)
+                caption_p.paragraph_format.space_after = Pt(6)
+                caption_run = caption_p.add_run(f"[{image_id}]")
+                caption_run.font.size = Pt(9)
+                caption_run.font.italic = True
+                caption_run.font.color.rgb = RGBColor(100, 100, 100)
             
             logger.debug(f"Added image {image_id} to document ({width_inches:.1f}x{height_inches:.1f} inches)")
             return True
@@ -489,8 +491,11 @@ class WordExporter:
         for img in images or []:
             aliases = {
                 img.get('image_id', ''),
+                img.get('id', ''),
                 Path(img.get('output_path', '')).stem if img.get('output_path') else '',
                 Path(img.get('file_path', '')).stem if img.get('file_path') else '',
+                Path(img.get('path', '')).stem if img.get('path') else '',
+                Path(img.get('filename', '')).stem if img.get('filename') else '',
                 Path(img.get('original_file_path', '')).stem
                 if img.get('original_file_path')
                 else '',
@@ -596,7 +601,7 @@ class WordExporter:
             if match:
                 img_id = match.group(1).strip()
                 if img_id in image_map:
-                    self.add_image_to_document(doc, image_map[img_id])
+                    self.add_image_to_document(doc, image_map[img_id], show_id_caption=False)
                     return True
                 else:
                     # Try old format fallback
@@ -613,7 +618,7 @@ class WordExporter:
                 img_num = match.group(1)
                 img_id = f'img_{img_num}'
                 if img_id in image_map:
-                    self.add_image_to_document(doc, image_map[img_id])
+                    self.add_image_to_document(doc, image_map[img_id], show_id_caption=False)
                 else:
                     p = doc.add_paragraph()
                     run = p.add_run(f"[IMAGE {img_num}]")
