@@ -38,6 +38,13 @@ def check_ocr_dependencies(translation_enabled=False):
     return True
 
 def main():
+    # Windows consoles may use a legacy code page that cannot print valid
+    # scientific Unicode, which must not abort an otherwise completed run
+    # before metrics are persisted.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(
         description="Document OCR & Conversion Pipeline - Convert PDFs to Word documents"
     )

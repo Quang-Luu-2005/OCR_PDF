@@ -484,12 +484,14 @@ class OCRPipeline:
 
     @staticmethod
     def _extract_pdf_table(blocks: List[tuple]) -> tuple[set[int], Optional[str]]:
-        """Turn the two simple row-based tables in this paper into Markdown.
+        """Turn simple row-based PDF tables into Markdown.
 
         PyMuPDF exposes each PDF table row as one text block containing the
         cell values separated by newlines. Reconstructing those rows here is
         considerably safer than asking the translation model to infer table
-        structure from a flat paragraph stream.
+        structure from a flat paragraph stream. The patterns cover both the
+        existing object-detection tables and the pediatric-radiograph paper's
+        three metric tables.
         """
         header_index = None
         column_count = 0
@@ -523,6 +525,52 @@ class OCRPipeline:
                     "Recall",
                     "mAP@0.5",
                     "mAP@0.5:0.95",
+                )
+                break
+            if "Upstream validation set" in text and "F1 score" in text and "Recall" in text:
+                header_index = index
+                column_count = 5
+                headers = (
+                    "Upstream validation set",
+                    "F1 score",
+                    "Accuracy",
+                    "Precision",
+                    "Recall",
+                )
+                break
+            if (
+                text.startswith("Network")
+                and "AUC" in text
+                and "F1 score" in text
+                and "Specificity" in text
+                and "NPV" in text
+            ):
+                header_index = index
+                column_count = 8
+                headers = (
+                    "Network",
+                    "AUC",
+                    "F1 score",
+                    "Accuracy",
+                    "Sensitivity",
+                    "Specificity",
+                    "PPV",
+                    "NPV",
+                )
+                break
+            if (
+                text.startswith("Network")
+                and "MAE" in text
+                and "MSE" in text
+                and "R2 score" in text
+            ):
+                header_index = index
+                column_count = 4
+                headers = (
+                    "Network",
+                    "MAE (Month) ± Stdev.",
+                    "MSE (month)",
+                    "R2 score",
                 )
                 break
 

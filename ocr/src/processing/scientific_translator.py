@@ -87,6 +87,11 @@ class ScientificTranslator:
         r"|(?:doi:\s*)?10\.\d{4,9}/[-._;()/:%A-Z0-9]+"
         r"|\[(?:\d+[a-z]?\s*[,;–-]?\s*)+\]"
         r"|\([A-Z][A-Za-z'’-]+(?:\s+et\s+al\.)?,?\s+\d{4}[a-z]?\)"
+        # Preserve scientific notation and mixed-case dataset/model
+        # identifiers as one token (for example 5e-24 and PedXnet-30C).
+        r"|\b\d+(?:\.\d+)?[eE][\-\u2212]?\d+\b"
+        r"|\b[A-Za-z]+[0-9]+[A-Za-z0-9]*\b"
+        r"|\b(?=[A-Za-z0-9_-]*\d)[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)+\b"
         r"|\b\d+[A-Za-z](?:-[A-Za-z])?/[A-Za-z]?\d+(?:\.\d+)?\b"
         r"|\b\d+(?:st|nd|rd|th)\b"
         r"|[-+]?\d+(?:[.,]\d+)*(?:\s*[-–]\s*\d+(?:[.,]\d+)*)?%?"
@@ -583,7 +588,8 @@ class ScientificTranslator:
             match = re.search(r"(?:\r?\n)+$", joined)
             trailing = match.group(0) if match else ""
             body = joined[:-len(trailing)] if trailing else joined
-            add(body, not cls._is_nontranslatable(body))
+            for part in cls._split_long_block(body):
+                add(part, not cls._is_nontranslatable(part))
             add(trailing, False)
 
         for raw_line in markdown.splitlines(keepends=True):
@@ -629,10 +635,53 @@ class ScientificTranslator:
             add("".join(code), False)
         return blocks
 
+    @staticmethod
+    def _split_long_block(text: str, max_chars: int = 900) -> List[str]:
+        """Split PDF-merged paragraphs without losing their original text."""
+        if len(text) <= max_chars:
+            return [text]
+
+        # Prefer sentence boundaries, keeping the whitespace with the segment
+        # that precedes it so concatenating the blocks reproduces the source.
+        boundaries = [match.end() for match in re.finditer(r"(?<=[.!?])\s+", text)]
+        chunks: List[str] = []
+        start = 0
+        last_boundary = start
+        for boundary in boundaries:
+            if boundary - start <= max_chars:
+                last_boundary = boundary
+                continue
+            if last_boundary > start:
+                chunks.append(text[start:last_boundary])
+                start = last_boundary
+                last_boundary = boundary
+
+        if start < len(text):
+            chunks.append(text[start:])
+
+        # A single sentence can still be unusually long. Fall back to safe
+        # whitespace cuts only for that exceptional segment.
+        safe_chunks: List[str] = []
+        for chunk in chunks:
+            while len(chunk) > max_chars:
+                cut = chunk.rfind(" ", 0, max_chars)
+                if cut <= 0:
+                    cut = max_chars
+                safe_chunks.append(chunk[:cut])
+                chunk = chunk[cut:]
+            if chunk:
+                safe_chunks.append(chunk)
+        return safe_chunks
+
     @classmethod
     def _is_nontranslatable(cls, text: str) -> bool:
         stripped = text.strip()
         if not stripped or stripped == "</break>":
+            return True
+        # Author affiliations/contact blocks are identifiers and addresses,
+        # not scientific prose. Keeping them verbatim avoids corrupting
+        # postal codes or e-mail addresses during translation.
+        if re.search(r"\b(?:email|e-mail|Present address):", stripped, re.IGNORECASE):
             return True
         if cls._IMAGE_RE.fullmatch(stripped):
             return True

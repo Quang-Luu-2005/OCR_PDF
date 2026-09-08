@@ -415,21 +415,32 @@ class MarkdownProcessor:
         Returns:
             Processed markdown text with image IDs
         """
-        # Step 0: Fix markdown syntax errors
+        # Step 0: Remove invisible PDF extraction artifacts before any
+        # correction/translation. Soft hyphens and C0 separators can make a
+        # model reinterpret nearby citation numbers or split words wrongly.
+        markdown_text = self._normalize_ocr_artifacts(markdown_text)
+
+        # Step 1: Fix markdown syntax errors
         markdown_text = self._fix_markdown_syntax(markdown_text)
         
-        # Step 1: Inject image IDs into markdown
+        # Step 2: Inject image IDs into markdown
         if images:
             markdown_text = self._inject_image_ids(markdown_text, images)
         
-        # Step 2: Insert section breaks
+        # Step 3: Insert section breaks
         markdown_text = self.insert_section_breaks(markdown_text)
         
-        # Step 3: Fix spelling with LLM
+        # Step 4: Fix spelling with LLM
         if self.use_llm_correction:
             markdown_text = self.fix_spelling_with_llm(markdown_text, images)
         
         return markdown_text
+
+    @staticmethod
+    def _normalize_ocr_artifacts(text: str) -> str:
+        """Normalize invisible characters introduced by PDF text extraction."""
+        text = text.replace("\u00ad", "")
+        return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", text)
     
     
     def _fix_markdown_syntax(self, text: str) -> str:
