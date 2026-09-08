@@ -25,6 +25,15 @@ BASE_SPACING = 1.0               # Base line spacing in Word output
 FONT_SIZE = 12                   # Font size in Word output (points)
 SAVE_JSON = False                # Save intermediate JSON results (markdown is saved instead)
 
+# Scientific English -> Vietnamese translation (enabled by default)
+ENABLE_VI_TRANSLATION = True
+TRANSLATION_API_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
+TRANSLATION_MODEL = "gemini-3.8-flash"
+TRANSLATION_TIMEOUT_SECONDS = 120
+TRANSLATION_CHUNK_CHARS = 8000
+TRANSLATION_MAX_RETRIES = 3
+TRANSLATION_MAX_TOKENS = 12000
+
 # Logging Configuration
 LOG_LEVEL = logging.INFO         # Logging level
 LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'

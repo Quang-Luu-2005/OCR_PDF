@@ -575,30 +575,20 @@ class MarkdownProcessor:
         if not images:
             return markdown_text
         
-        # Create mapping of image IDs
-        image_map = {}
-        for img in images:
-            if 'image_id' in img:
-                # Track the image ID for this image reference
-                original_key = img.get('original_key', img.get('image_id'))
-                image_map[original_key] = img['image_id']
-        
-        # Replace image placeholders with ID-mapped references
-        result = markdown_text
-        for original_key, image_id in image_map.items():
-            # Find all placeholders
-            placeholders = re.findall(r'\[IMAGE_PLACEHOLDER_\d+\]', result)
-            
-            # Replace placeholders with image ID references
-            for idx, placeholder in enumerate(placeholders, 1):
-                if idx <= len(images):
-                    img = images[idx - 1]
-                    image_id = img.get('image_id', f'img_{idx}')
-                    
-                    # Create a markdown reference with image ID
-                    image_reference = f"![id: {image_id}]({image_id}.png)"
-                    result = result.replace(placeholder, image_reference, 1)
-                    
-                    logger.debug(f"Injected image ID: {image_id} at placeholder {placeholder}")
-        
-        return result
+        def replacement(match):
+            image_number = int(match.group(1))
+            image_index = image_number - 1
+            if not 0 <= image_index < len(images):
+                return match.group(0)
+            image_id = images[image_index].get('image_id', f'img_{image_number}')
+            logger.debug(f"Injected image ID: {image_id} at placeholder {match.group(0)}")
+            return f"![id: {image_id}]({image_id}.png)"
+
+        # Marker commonly wraps its image key in ![](...). Replace the whole
+        # wrapper first to avoid producing nested, malformed Markdown images.
+        result = re.sub(
+            r'!\[[^\]]*\]\(\s*\[IMAGE_PLACEHOLDER_(\d+)\]\s*\)',
+            replacement,
+            markdown_text,
+        )
+        return re.sub(r'\[IMAGE_PLACEHOLDER_(\d+)\]', replacement, result)

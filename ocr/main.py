@@ -4,6 +4,7 @@
 import argparse
 import sys
 import logging
+import os
 from pathlib import Path
 
 from src.core.pipeline import OCRPipeline
@@ -14,13 +15,19 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-def check_ocr_dependencies():
+def check_ocr_dependencies(translation_enabled=False):
     """Check if all required libraries for marker-pdf OCR are available"""
     missing = []
     try:
         from marker.converters.pdf import PdfConverter
     except ImportError:
         missing.append("marker-pdf")
+    if translation_enabled:
+        try:
+            import openai  # noqa: F401
+            import dotenv  # noqa: F401
+        except ImportError:
+            missing.append("openai and python-dotenv")
     if missing:
         print("Missing required libraries:")
         for lib in missing:
@@ -110,6 +117,24 @@ def main():
         action="store_true",
         help="Enable FREE spelling correction for OCR output (no API costs!)"
     )
+
+    parser.add_argument(
+        "--no-translate-vi",
+        action="store_true",
+        help="Disable the default scientific English-to-Vietnamese translation"
+    )
+
+    parser.add_argument(
+        "--translation-model",
+        default=None,
+        help="OpenAI-compatible translation model (default: config/env gemini-3.8-flash)"
+    )
+
+    parser.add_argument(
+        "--translation-base-url",
+        default=None,
+        help="OpenAI-compatible API base URL (API key is read only from the environment)"
+    )
     
     args = parser.parse_args()
 
@@ -122,8 +147,40 @@ def main():
         cfg = None
         cfg_loaded = False
 
-    # Check dependencies before running
-    if not check_ocr_dependencies():
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(Path(__file__).resolve().parent / ".env")
+    except ImportError:
+        pass
+
+    if cfg_loaded:
+        for setting in (
+            "TRANSLATION_API_BASE",
+            "TRANSLATION_MODEL",
+            "TRANSLATION_TIMEOUT_SECONDS",
+            "TRANSLATION_CHUNK_CHARS",
+            "TRANSLATION_MAX_RETRIES",
+            "TRANSLATION_MAX_TOKENS",
+        ):
+            if hasattr(cfg, setting):
+                os.environ.setdefault(setting, str(getattr(cfg, setting)))
+
+    config_translation_enabled = (
+        bool(getattr(cfg, "ENABLE_VI_TRANSLATION", True)) if cfg_loaded else True
+    )
+    translation_enabled = config_translation_enabled and not args.no_translate_vi
+
+    if translation_enabled and not (
+        os.getenv("GEMINI_API_KEY") or os.getenv("TRANSLATION_API_KEY")
+    ):
+        print("Vietnamese translation is enabled, but no API key was found.")
+        print("Copy ocr/.env.example to ocr/.env and set GEMINI_API_KEY,")
+        print("or run with --no-translate-vi.")
+        sys.exit(1)
+
+    # Check dependencies only after the cheap credential preflight.
+    if not check_ocr_dependencies(translation_enabled):
         sys.exit(1)
 
     # Resolve input path: CLI arg > config.INPUT_DIR > error
@@ -150,6 +207,15 @@ def main():
         # Override dpi if user did not supply a custom value
         if args.dpi == 300 and hasattr(cfg, "DPI"):
             args.dpi = cfg.DPI
+
+    translation_model = args.translation_model or os.getenv("TRANSLATION_MODEL") or (
+        getattr(cfg, "TRANSLATION_MODEL", None) if cfg_loaded else None
+    )
+    translation_base_url = (
+        args.translation_base_url
+        or os.getenv("TRANSLATION_API_BASE")
+        or (getattr(cfg, "TRANSLATION_API_BASE", None) if cfg_loaded else None)
+    )
 
     # Determine enable_preprocessing
     if args.no_preprocess:
@@ -178,7 +244,10 @@ def main():
         extract_images=not args.no_images,
         analyze_layout=not args.no_layout,
         extract_tables=not args.no_tables,
-        use_llm_correction=args.llm_correction
+        use_llm_correction=args.llm_correction,
+        enable_vi_translation=translation_enabled,
+        translation_model=translation_model,
+        translation_base_url=translation_base_url,
     )
 
     mode = None if args.mode == "auto" else args.mode
@@ -196,6 +265,8 @@ def main():
         print(f"\nProcessing: {input_path.name}")
         output_path = pipeline.process_pdf(input_path, mode=mode)
         print(f"\nSuccess! Output saved to: {output_path}")
+        for label, artifact_path in pipeline.output_artifacts.items():
+            print(f"   {label}: {artifact_path}")
         
         # Display metrics summary
         print(pipeline.metrics.get_formatted_summary())

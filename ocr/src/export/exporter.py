@@ -33,7 +33,13 @@ class WordExporter:
             bool: True if image was added successfully, False otherwise
         """
         try:
-            image_path = Path(image_data.get('file_path', ''))
+            image_path_value = image_data.get('output_path') or image_data.get('file_path')
+            if not image_path_value:
+                logger.debug(
+                    f"Skipping image {image_data.get('image_id', 'unknown')}: no image path"
+                )
+                return False
+            image_path = Path(image_path_value)
             
             # Skip if file doesn't exist (filtered out during extraction)
             if not image_path.exists():

@@ -48,6 +48,19 @@ class PipelineMetrics:
             'processing_time_seconds': 0,      # thời gian xử lý
             'files_processed': [],             # danh sách files
             'images_extracted': [],            # danh sách images
+            'translation': {
+                'enabled': False,
+                'model': None,
+                'base_url': None,
+                'input_tokens': 0,
+                'output_tokens': 0,
+                'total_tokens': 0,
+                'chunks': 0,
+                'cache_hits': 0,
+                'retries': 0,
+                'glossary_terms': 0,
+                'outputs': {}
+            },
             'errors': []                       # danh sách lỗi
         }
     
@@ -149,6 +162,36 @@ class PipelineMetrics:
         """Record an error during processing"""
         self.metrics['errors'].append(error_msg)
         logger.warning(f"Pipeline error recorded: {error_msg}")
+
+    def set_translation_metrics(
+        self,
+        *,
+        enabled: bool,
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        total_tokens: int = 0,
+        chunks: int = 0,
+        cache_hits: int = 0,
+        retries: int = 0,
+        glossary_terms: int = 0,
+        outputs: Optional[Dict[str, str]] = None,
+    ):
+        """Record scientific-translation configuration, usage and outputs."""
+        self.metrics['translation'] = {
+            'enabled': bool(enabled),
+            'model': model,
+            'base_url': base_url,
+            'input_tokens': int(input_tokens),
+            'output_tokens': int(output_tokens),
+            'total_tokens': int(total_tokens),
+            'chunks': int(chunks),
+            'cache_hits': int(cache_hits),
+            'retries': int(retries),
+            'glossary_terms': int(glossary_terms),
+            'outputs': outputs or {},
+        }
     
     def get_metrics_summary(self) -> Dict[str, Any]:
         """Get the current metrics summary"""
@@ -189,6 +232,18 @@ class PipelineMetrics:
             lines.append(f"   • DOCX: {self._format_bytes(metrics['docx_size_bytes'])}")
         if metrics['image_size_bytes']:
             lines.append(f"   • Images: {self._format_bytes(metrics['image_size_bytes'])}")
+
+        translation = metrics.get('translation', {})
+        lines.append("\nVietnamese scientific translation:")
+        lines.append(f"   • Enabled: {translation.get('enabled', False)}")
+        if translation.get('enabled'):
+            lines.append(f"   • Model: {translation.get('model')}")
+            lines.append(f"   • Chunks: {translation.get('chunks', 0)}")
+            lines.append(f"   • Cache hits: {translation.get('cache_hits', 0)}")
+            lines.append(f"   • Retries: {translation.get('retries', 0)}")
+            lines.append(f"   • Tokens: {translation.get('total_tokens', 0):,}")
+            for label, path in translation.get('outputs', {}).items():
+                lines.append(f"   • {label}: {path}")
         
         # Files processed
         if metrics['files_processed']:
