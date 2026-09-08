@@ -41,7 +41,7 @@ class DummyExporter:
 
 
 class DummyTranslator:
-    model = "gemini-3.8-flash"
+    model = "gemini-3.5-flash"
     base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
     cache_dir = None
 
@@ -71,7 +71,7 @@ class PipelineTranslationTests(unittest.TestCase):
     def setUp(self):
         DummyExporter.calls = []
 
-    def make_pipeline(self, root, translator=None, enabled=True):
+    def make_pipeline(self, root, translator=None, enabled=True, use_marker=True):
         from src.core.pipeline import OCRPipeline
 
         with (
@@ -84,6 +84,7 @@ class PipelineTranslationTests(unittest.TestCase):
                 temp_dir=Path(root) / "temp",
                 enable_vi_translation=enabled,
                 translator=translator,
+                use_marker_for_digital_translation=use_marker,
             )
 
     def prepare_input(self, root):
@@ -97,7 +98,7 @@ class PipelineTranslationTests(unittest.TestCase):
     def test_scan_writes_corrected_and_vietnamese_outputs_atomically(self):
         with tempfile.TemporaryDirectory() as root:
             translator = DummyTranslator()
-            pipeline = self.make_pipeline(root, translator)
+            pipeline = self.make_pipeline(root, translator, use_marker=True)
             pdf_path = self.prepare_input(root)
             output_path = pipeline.process_pdf(pdf_path, mode="scan")
 
@@ -112,7 +113,7 @@ class PipelineTranslationTests(unittest.TestCase):
     def test_digital_keeps_pdf2docx_and_also_builds_translated_word(self):
         with tempfile.TemporaryDirectory() as root:
             translator = DummyTranslator()
-            pipeline = self.make_pipeline(root, translator)
+            pipeline = self.make_pipeline(root, translator, use_marker=True)
             pdf_path = self.prepare_input(root)
             output_path = pipeline.process_pdf(pdf_path, mode="digital")
 
@@ -120,6 +121,27 @@ class PipelineTranslationTests(unittest.TestCase):
             self.assertTrue(pipeline.output_artifacts["vi_docx"].exists())
             self.assertEqual(1, len(DummyExporter.calls))
             self.assertEqual(1, translator.calls)
+
+    def test_digital_uses_text_image_fallback_when_marker_backend_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as root:
+            translator = DummyTranslator()
+            pipeline = self.make_pipeline(root, translator, use_marker=False)
+            pdf_path = self.prepare_input(root)
+            fallback = {
+                "markdown": "# Fallback Results\n\n![id: fallback_img](fallback_img.png)",
+                "images": [{
+                    "image_id": "fallback_img",
+                    "output_path": str(Path(root) / "source.png"),
+                    "file_path": str(Path(root) / "source.png"),
+                }],
+            }
+            with patch.object(pipeline.ocr_engine, "process_pdf", side_effect=AssertionError("Marker must not be called")) as marker_mock:
+                with patch.object(pipeline, "_extract_digital_markdown_fallback", return_value=fallback) as fallback_mock:
+                    pipeline.process_pdf(pdf_path, mode="digital")
+
+            marker_mock.assert_not_called()
+            fallback_mock.assert_called_once_with(pdf_path)
+            self.assertTrue(pipeline.output_artifacts["vi_docx"].exists())
 
     def test_no_translate_digital_never_calls_marker_or_api(self):
         with tempfile.TemporaryDirectory() as root:

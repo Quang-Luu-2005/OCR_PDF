@@ -127,7 +127,7 @@ def main():
     parser.add_argument(
         "--translation-model",
         default=None,
-        help="OpenAI-compatible translation model (default: config/env gemini-3.8-flash)"
+        help="OpenAI-compatible translation model (default: config/env gemini-3.5-flash)"
     )
 
     parser.add_argument(
@@ -216,6 +216,10 @@ def main():
         or os.getenv("TRANSLATION_API_BASE")
         or (getattr(cfg, "TRANSLATION_API_BASE", None) if cfg_loaded else None)
     )
+    use_marker_for_digital = bool(
+        getattr(cfg, "USE_MARKER_FOR_DIGITAL_TRANSLATION", False)
+        if cfg_loaded else False
+    )
 
     # Determine enable_preprocessing
     if args.no_preprocess:
@@ -248,6 +252,7 @@ def main():
         enable_vi_translation=translation_enabled,
         translation_model=translation_model,
         translation_base_url=translation_base_url,
+        use_marker_for_digital_translation=use_marker_for_digital,
     )
 
     mode = None if args.mode == "auto" else args.mode

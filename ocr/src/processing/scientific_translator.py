@@ -68,7 +68,7 @@ class ScientificTranslator:
 
     PROMPT_VERSION = "scientific-vi-v2-gemini"
     DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
-    DEFAULT_MODEL = "gemini-3.8-flash"
+    DEFAULT_MODEL = "gemini-3.5-flash"
 
     _IMAGE_RE = re.compile(
         r"!\[[^\]]*\]\([^\)]+\)|\[IMAGE_PLACEHOLDER_\d+\]",
@@ -87,8 +87,11 @@ class ScientificTranslator:
         r"|(?:doi:\s*)?10\.\d{4,9}/[-._;()/:%A-Z0-9]+"
         r"|\[(?:\d+[a-z]?\s*[,;–-]?\s*)+\]"
         r"|\([A-Z][A-Za-z'’-]+(?:\s+et\s+al\.)?,?\s+\d{4}[a-z]?\)"
-        r"|(?<![\w])[-+]?\d+(?:[.,]\d+)*\s*(?:%|mm|cm|km|m|kg|mg|g|mL|L|s|ms|Hz|MHz|GHz|px|dpi)\b"
-        r"|(?-i:\b[A-Z][A-Z0-9-]{1,}\b)"
+        r"|\b\d+[A-Za-z](?:-[A-Za-z])?/[A-Za-z]?\d+(?:\.\d+)?\b"
+        r"|\b\d+(?:st|nd|rd|th)\b"
+        r"|[-+]?\d+(?:[.,]\d+)*(?:\s*[-–]\s*\d+(?:[.,]\d+)*)?%?"
+        r"\s*(?:%|mm|cm|km|m|kg|mg|g|mL|L|s|ms|Hz|MHz|GHz|px|dpi)?\b"
+        r"|(?-i:\b[A-Z]{2,}[A-Z0-9-]*\b)"
         r"|</?[^>]+>",
         re.IGNORECASE,
     )
@@ -292,7 +295,7 @@ class ScientificTranslator:
                     '{"terms":[{"source":"...","vi":"...","keep_english":false}]}. '
                     "Use established Vietnamese scientific terminology. Preserve dataset, software, model, "
                     "organization and proper names. Use keep_english=true for specialized terms that should "
-                    "also appear in English on first use. Do not include ordinary words."
+                    "also appear in English on first use. Do not include ordinary words. Return at most 60 terms."
                 ),
             },
             {
@@ -317,7 +320,7 @@ class ScientificTranslator:
             messages,
             purpose="glossary",
             validator=validate,
-            max_tokens=min(4000, self.max_tokens),
+            max_tokens=min(8000, self.max_tokens),
         )
         self._accumulate_usage(usage, request_usage, cache_hit, retries)
 
@@ -483,10 +486,26 @@ class ScientificTranslator:
             restored_corrected = self._restore(corrected, protected.replacements)
             restored_vi = self._restore(vi, protected.replacements)
             source_numbers = Counter(self._NUMBER_RE.findall(source))
-            if Counter(self._NUMBER_RE.findall(restored_corrected)) != source_numbers:
-                raise TranslationValidationError(f"Block {block_id} changed source numerical values.")
-            if Counter(self._NUMBER_RE.findall(restored_vi)) != source_numbers:
-                raise TranslationValidationError(f"Block {block_id} changed translated numerical values.")
+            protected_numbers = Counter(
+                number
+                for original in protected.replacements.values()
+                for number in self._NUMBER_RE.findall(original)
+            )
+            source_digits = Counter(re.findall(r"\d+", source))
+            protected_digits = Counter(
+                digit
+                for original in protected.replacements.values()
+                for digit in re.findall(r"\d+", original)
+            )
+            all_numbers_protected = all(
+                protected_digits[digit] >= count
+                for digit, count in source_digits.items()
+            )
+            if not all_numbers_protected and protected_numbers != source_numbers:
+                if Counter(self._NUMBER_RE.findall(restored_corrected)) != source_numbers:
+                    raise TranslationValidationError(f"Block {block_id} changed source numerical values.")
+                if Counter(self._NUMBER_RE.findall(restored_vi)) != source_numbers:
+                    raise TranslationValidationError(f"Block {block_id} changed translated numerical values.")
 
             source_heading = re.match(r"^\s*(#{1,6})\s+", source)
             if source_heading:
@@ -514,7 +533,7 @@ class ScientificTranslator:
             "changing meaning. Then translate that corrected text into formal, precise Vietnamese suitable for a "
             "peer-reviewed scientific paper. Never summarize, omit, expand, explain or invent. Follow the supplied "
             "glossary consistently. Preserve Markdown syntax, paragraph role, table pipes, datasets, software, model "
-            "names, proper nouns, acronyms, citations, values and units. Tokens like __KEEP_0001__ are immutable and "
+            "names, proper nouns, acronyms, citations, values and units. Tokens like `KEEP_TOKEN_0001` are immutable and "
             "must occur exactly once in both outputs. For specialized or ambiguous terms marked keep_english, include "
             "the English term in parentheses only when that source term appears in include_english_on_first_use; "
             "otherwise use the glossary's Vietnamese term without adding English again."
@@ -527,10 +546,10 @@ class ScientificTranslator:
 
         def repl(match: re.Match[str]) -> str:
             nonlocal next_index
-            placeholder = f"__KEEP_{next_index:04d}__"
+            placeholder = f"`KEEP_TOKEN_{next_index:04d}`"
             while placeholder in text or placeholder in replacements:
                 next_index += 1
-                placeholder = f"__KEEP_{next_index:04d}__"
+                placeholder = f"`KEEP_TOKEN_{next_index:04d}`"
             replacements[placeholder] = match.group(0)
             next_index += 1
             return placeholder

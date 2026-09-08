@@ -46,8 +46,8 @@ class FakeCompletions:
             corrected = item["source"].replace("teh", "the")
             translated = corrected.replace("Results", "Kết quả")
             if self.remove_protected:
-                corrected = corrected.replace("__KEEP_0000__", "")
-                translated = translated.replace("__KEEP_0000__", "")
+                corrected = corrected.replace("`KEEP_TOKEN_0000`", "")
+                translated = translated.replace("`KEEP_TOKEN_0000`", "")
             items.append({
                 "id": item["id"],
                 "corrected_source": corrected,

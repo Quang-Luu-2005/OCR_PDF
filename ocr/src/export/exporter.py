@@ -485,7 +485,18 @@ class WordExporter:
         doc = Document()
         
         # --- Helper: Image Lookup ---
-        image_map = {img.get('image_id', ''): img for img in images} if images else {}
+        image_map = {}
+        for img in images or []:
+            aliases = {
+                img.get('image_id', ''),
+                Path(img.get('output_path', '')).stem if img.get('output_path') else '',
+                Path(img.get('file_path', '')).stem if img.get('file_path') else '',
+                Path(img.get('original_file_path', '')).stem
+                if img.get('original_file_path')
+                else '',
+            }
+            for alias in aliases - {''}:
+                image_map[alias] = img
 
         # --- Helper: Apply formatting (Bold/Italic/Code/Links/Subscript/Superscript/Math) ---
         def add_formatted_text(paragraph, text):

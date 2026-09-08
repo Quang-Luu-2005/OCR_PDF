@@ -28,11 +28,14 @@ SAVE_JSON = False                # Save intermediate JSON results (markdown is s
 # Scientific English -> Vietnamese translation (enabled by default)
 ENABLE_VI_TRANSLATION = True
 TRANSLATION_API_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
-TRANSLATION_MODEL = "gemini-3.8-flash"
+TRANSLATION_MODEL = "gemini-3.5-flash"
 TRANSLATION_TIMEOUT_SECONDS = 120
 TRANSLATION_CHUNK_CHARS = 8000
 TRANSLATION_MAX_RETRIES = 3
 TRANSLATION_MAX_TOKENS = 12000
+# Digital PDFs use PyMuPDF directly for translation by default, so Marker does
+# not auto-start Surya/vLLM/Docker. Set True only when Marker is configured.
+USE_MARKER_FOR_DIGITAL_TRANSLATION = False
 
 # Logging Configuration
 LOG_LEVEL = logging.INFO         # Logging level

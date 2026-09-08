@@ -11,7 +11,7 @@ python -m pip install -r ocr/requirements.txt
 Copy-Item ocr/.env.example ocr/.env
 ```
 
-Mở `ocr/.env` và điền `GEMINI_API_KEY` lấy từ Google AI Studio. Dịch tiếng Việt được bật mặc định, dùng API tương thích OpenAI của Google tại `https://generativelanguage.googleapis.com/v1beta/openai/` với model `gemini-3.8-flash`; model không được tải về máy.
+Mở `ocr/.env` và điền `GEMINI_API_KEY` lấy từ Google AI Studio. Dịch tiếng Việt được bật mặc định, dùng API tương thích OpenAI của Google tại `https://generativelanguage.googleapis.com/v1beta/openai/` với model `gemini-3.5-flash`; model không được tải về máy.
 
 ## Chạy một PDF
 
@@ -26,7 +26,7 @@ Các mode:
 - `scan`: ép chạy OCR.
 - `digital`: ép xử lý PDF digital.
 
-Khi dịch được bật, cả hai mode đều dùng Marker để tạo Markdown có cấu trúc và ánh xạ ảnh. Riêng mode `digital` vẫn giữ thêm file Word gốc do `pdf2docx` tạo.
+Khi dịch được bật, PDF digital mặc định dùng PyMuPDF để lấy text/ảnh nên không cần Docker; PDF scan dùng Marker/Surya. Riêng mode `digital` vẫn giữ thêm file Word gốc do `pdf2docx` tạo. Có thể bật Marker cho PDF digital bằng `USE_MARKER_FOR_DIGITAL_TRANSLATION=True` trong `config.py` nếu đã cài backend native phù hợp.
 
 Các đầu ra dịch:
 

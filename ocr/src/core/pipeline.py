@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import subprocess
 from hashlib import sha256
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -44,6 +45,7 @@ class OCRPipeline:
         translation_model: Optional[str] = None,
         translation_base_url: Optional[str] = None,
         translator: Optional[Any] = None,
+        use_marker_for_digital_translation: bool = False,
     ):
         """
         Initialize OCR Pipeline
@@ -68,6 +70,7 @@ class OCRPipeline:
         self.extract_tables = extract_tables
         self.use_llm_correction = use_llm_correction
         self.enable_vi_translation = enable_vi_translation
+        self.use_marker_for_digital_translation = use_marker_for_digital_translation
         # Maximum number of worker threads for page-level parallelism.
         # If None, defaults to number of CPUs.
         self.max_workers: Optional[int] = None
@@ -178,7 +181,15 @@ class OCRPipeline:
         try:
             self.digital_parser.convert(pdf_path, output_path)
             if self.enable_vi_translation:
-                self._process_structured_markdown(pdf_path, english_docx_path=None)
+                self._process_structured_markdown(
+                    pdf_path,
+                    english_docx_path=None,
+                    allow_digital_fallback=(
+                        not self.use_marker_for_digital_translation
+                        or not self._vllm_backend_available()
+                    ),
+                    prefer_digital_fallback=not self.use_marker_for_digital_translation,
+                )
             return output_path
         except Exception as e:
             logger.error(f"Digital conversion failed: {e}")
@@ -199,9 +210,24 @@ class OCRPipeline:
         self,
         pdf_path: Path,
         english_docx_path: Optional[Path],
+        allow_digital_fallback: bool = False,
+        prefer_digital_fallback: bool = False,
     ) -> None:
         """Extract structured Markdown, translate it and build image-aware Word files."""
-        marker_result = self.ocr_engine.process_pdf(pdf_path)
+        if prefer_digital_fallback:
+            logger.info("Using PyMuPDF for digital PDF; Marker/Docker is disabled.")
+            marker_result = self._extract_digital_markdown_fallback(pdf_path)
+        else:
+            try:
+                marker_result = self.ocr_engine.process_pdf(pdf_path)
+            except Exception as marker_error:
+                if not allow_digital_fallback:
+                    raise
+                logger.warning(
+                    "Marker could not process digital PDF; using PyMuPDF text/image fallback: %s",
+                    marker_error,
+                )
+                marker_result = self._extract_digital_markdown_fallback(pdf_path)
         organized_images = self._organize_extracted_images(
             marker_result.get('images', []), pdf_path
         )
@@ -271,6 +297,95 @@ class OCRPipeline:
             docx_path=english_docx_path,
         )
 
+    def _extract_digital_markdown_fallback(self, pdf_path: Path) -> Dict[str, Any]:
+        """Extract a structured text/image Markdown fallback for digital PDFs.
+
+        Marker remains the preferred extractor. This fallback is useful when
+        Surya's optional vLLM Docker backend is unavailable, while preserving
+        the same image IDs consumed by MarkdownProcessor and WordExporter.
+        """
+        try:
+            import fitz
+        except ImportError as exc:
+            raise RuntimeError(
+                "PyMuPDF is required for the digital-PDF fallback. "
+                "Install it with: pip install PyMuPDF"
+            ) from exc
+
+        markdown_parts: List[str] = []
+        images: List[Dict[str, Any]] = []
+        document = fitz.open(str(pdf_path))
+        try:
+            for page_number, page in enumerate(document, start=1):
+                blocks = page.get_text("blocks", sort=True)
+                page_text = "\n\n".join(
+                    block[4].strip()
+                    for block in blocks
+                    if len(block) >= 5 and block[4].strip()
+                )
+                if page_text:
+                    markdown_parts.append(page_text)
+
+                for image_number, image_info in enumerate(page.get_images(full=True), start=1):
+                    xref = image_info[0]
+                    extracted = document.extract_image(xref)
+                    image_id = f"{pdf_path.stem}_page_{page_number:03d}_img_{image_number:02d}"
+                    extension = extracted.get("ext", "png")
+                    output_path = self.images_output_dir / f"{image_id}.{extension}"
+                    output_path.write_bytes(extracted["image"])
+                    markdown_parts.append(
+                        f"![id: {image_id}]({image_id}.{extension})"
+                    )
+                    images.append({
+                        "image_id": image_id,
+                        "output_path": str(output_path),
+                        "file_path": str(output_path),
+                        "page_num": page_number,
+                        "type": "image",
+                        "width": extracted.get("width", 800),
+                        "height": extracted.get("height", 600),
+                    })
+        finally:
+            document.close()
+
+        index_path = self.output_dir / "images_index.json"
+        index_data = {
+            "source_pdf": str(pdf_path),
+            "output_folder": str(self.images_output_dir),
+            "total_images": len(images),
+            "images": [
+                {
+                    "id": image["image_id"],
+                    "filename": Path(image["output_path"]).name,
+                    "path": image["output_path"],
+                }
+                for image in images
+            ],
+        }
+        self._atomic_write_text(
+            index_path,
+            json.dumps(index_data, indent=2, ensure_ascii=False),
+        )
+        return {
+            "markdown": "\n\n".join(markdown_parts),
+            "images": images,
+        }
+
+    @staticmethod
+    def _vllm_backend_available() -> bool:
+        """Return whether Marker can launch its optional Surya vLLM image."""
+        try:
+            result = subprocess.run(
+                ["docker", "image", "inspect", "vllm/vllm-openai:v0.20.1"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=10,
+            )
+            return result.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
     @staticmethod
     def _atomic_write_text(path: Path, content: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -319,10 +434,22 @@ class OCRPipeline:
                 image_id = f"{pdf_path.stem}_img_{idx:03d}"
                 
                 # Copy image to organized output folder
-                output_filename = f"{image_id}.png"
+                # Normalize JPEGs to a standard PNG container. Some JPEG
+                # streams extracted from PDFs are readable by Pillow but are
+                # rejected by python-docx even when their suffix is .jpeg.
+                output_suffix = original_path.suffix.lower() or ".png"
+                if output_suffix in {".jpg", ".jpeg"}:
+                    output_suffix = ".png"
+                output_filename = f"{image_id}{output_suffix}"
                 output_path = self.images_output_dir / output_filename
-                
-                shutil.copy2(original_path, output_path)
+
+                if original_path.suffix.lower() in {".jpg", ".jpeg"}:
+                    from PIL import Image
+
+                    with Image.open(original_path) as pil_image:
+                        pil_image.convert("RGB").save(output_path, format="PNG")
+                else:
+                    shutil.copy2(original_path, output_path)
                 
                 # Update image data with organized path and ID
                 organized_image = image.copy()
