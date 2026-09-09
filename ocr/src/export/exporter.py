@@ -4,18 +4,154 @@ from docx import Document
 from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.style import WD_STYLE_TYPE
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
+from docx.oxml import parse_xml
 import re
 import logging
+import os
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
 class WordExporter:
-    def __init__(self, base_spacing=1.0, font_size=12, max_image_width=6.0):
+    def __init__(
+        self,
+        base_spacing=1.0,
+        font_size=12,
+        max_image_width=6.0,
+        mml2omml_xsl_path=None,
+    ):
         self.base_spacing = base_spacing
         self.font_size = font_size
         self.max_image_width = max_image_width  # Maximum width in inches for embedded images
+        self.mml2omml_xsl_path = self._resolve_mml2omml_xsl(mml2omml_xsl_path)
+        self._mml2omml_transform = None
+
+    @staticmethod
+    def _resolve_mml2omml_xsl(configured_path=None):
+        candidates = [
+            configured_path,
+            os.getenv("MML2OMML_XSL_PATH"),
+            r"C:\Program Files\Microsoft Office\root\Office16\MML2OMML.XSL",
+            r"C:\Program Files (x86)\Microsoft Office\root\Office16\MML2OMML.XSL",
+        ]
+        for candidate in candidates:
+            if candidate and Path(candidate).is_file():
+                return Path(candidate)
+        return None
+
+    def _latex_to_omml(self, latex):
+        if not self.mml2omml_xsl_path:
+            raise RuntimeError("MML2OMML.XSL was not found")
+        try:
+            from latex2mathml.converter import convert
+            from lxml import etree
+        except ImportError as exc:
+            raise RuntimeError("latex2mathml and lxml are required for Word equations") from exc
+
+        if self._mml2omml_transform is None:
+            self._mml2omml_transform = etree.XSLT(
+                etree.parse(str(self.mml2omml_xsl_path))
+            )
+        mathml = convert(latex)
+        transformed = self._mml2omml_transform(etree.fromstring(mathml.encode("utf-8")))
+        xml = etree.tostring(transformed, encoding="unicode")
+        if "oMath" not in xml:
+            raise RuntimeError("MathML conversion did not produce OMML")
+        return parse_xml(xml)
+
+    def _append_native_equation(self, paragraph, latex):
+        try:
+            paragraph._p.append(self._latex_to_omml(latex))
+            return True
+        except Exception as exc:
+            logger.warning("Could not create native Word equation for %r: %s", latex, exc)
+            return False
+
+    @staticmethod
+    def _native_equation_is_portable(latex):
+        """Use OMML only for shapes verified to render in Word and LibreOffice.
+
+        LibreOffice currently fragments transformed OMML containing large
+        operators across lines/cells. The source crop is the lossless fallback
+        for those expressions; ordinary fractions, powers and inline math stay
+        editable.
+        """
+        return not re.search(
+            r"\\(?:sum|prod|int|iint|iiint)(?=[_{\s])"
+            r"|\\begin\s*\{(?:matrix|cases|aligned)\}",
+            latex or "",
+        )
+
+    @staticmethod
+    def _equation_value(equation, name, default=None):
+        if isinstance(equation, dict):
+            return equation.get(name, default)
+        return getattr(equation, name, default)
+
+    def _add_equation_image(self, paragraph, equation):
+        image_path = Path(self._equation_value(equation, "image_path", ""))
+        if not image_path.is_file():
+            return False
+        width_inches = 6.2
+        try:
+            from PIL import Image
+
+            with Image.open(image_path) as image:
+                width_inches = min(6.2, max(1.0, image.width / 300.0))
+        except Exception:
+            pass
+        paragraph.add_run().add_picture(str(image_path), width=Inches(width_inches))
+        return True
+
+    def _add_display_equation(self, doc, latex, equation=None, number=None):
+        # A source crop already includes its equation number. Put it in a
+        # full-width paragraph so long equations are never clipped by a table
+        # cell in LibreOffice.
+        if equation is not None and (
+            not latex or not self._native_equation_is_portable(latex)
+        ):
+            image_paragraph = doc.add_paragraph()
+            image_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            image_paragraph.paragraph_format.space_before = Pt(3)
+            image_paragraph.paragraph_format.space_after = Pt(3)
+            if self._add_equation_image(image_paragraph, equation):
+                if not isinstance(equation, dict):
+                    equation.output_mode = "image"
+                return True
+
+        table = doc.add_table(rows=1, cols=3)
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        table.autofit = False
+        widths = (Inches(0.55), Inches(5.25), Inches(0.65))
+        for cell, width in zip(table.rows[0].cells, widths):
+            cell.width = width
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            cell.paragraphs[0].paragraph_format.space_before = Pt(2)
+            cell.paragraphs[0].paragraph_format.space_after = Pt(2)
+
+        formula_paragraph = table.cell(0, 1).paragraphs[0]
+        formula_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        rendered = False
+        if latex and self._native_equation_is_portable(latex):
+            rendered = self._append_native_equation(formula_paragraph, latex)
+        if not rendered and equation is not None:
+            rendered = self._add_equation_image(formula_paragraph, equation)
+            if rendered and not isinstance(equation, dict):
+                equation.output_mode = "image"
+                if not equation.validation_error:
+                    equation.validation_error = "OMML conversion failed"
+        if not rendered:
+            run = formula_paragraph.add_run("[Equation unavailable]")
+            run.font.italic = True
+            run.font.color.rgb = RGBColor(128, 128, 128)
+
+        if number:
+            number_paragraph = table.cell(0, 2).paragraphs[0]
+            number_paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            number_paragraph.add_run(f"({str(number).strip('() ')})")
+        return rendered
 
     @staticmethod
     def center_y(box):
@@ -479,7 +615,13 @@ class WordExporter:
 
     
 
-    def markdown_to_word(self, markdown_text, output_path="output.docx", images=None):
+    def markdown_to_word(
+        self,
+        markdown_text,
+        output_path="output.docx",
+        images=None,
+        equations=None,
+    ):
         """
         Convert markdown text to Word document with native tables and formatting.
         Properly handles markdown syntax including bold, italic, code, links, and more.
@@ -502,6 +644,12 @@ class WordExporter:
             }
             for alias in aliases - {''}:
                 image_map[alias] = img
+
+        equation_map = {
+            self._equation_value(equation, "equation_id"): equation
+            for equation in equations or []
+            if self._equation_value(equation, "equation_id")
+        }
 
         # --- Helper: Apply formatting (Bold/Italic/Code/Links/Subscript/Superscript/Math) ---
         def add_formatted_text(paragraph, text):
@@ -536,12 +684,12 @@ class WordExporter:
                 
                 # LaTeX inline math $...$
                 if part.startswith('$') and part.endswith('$') and len(part) > 2:
-                    # Remove $ signs and render as italic with special formatting
                     math_content = part[1:-1]
-                    run.text = math_content
-                    run.font.italic = True
-                    run.font.name = 'Cambria Math'
-                    run.font.color.rgb = RGBColor(0, 51, 102)
+                    paragraph._p.remove(run._element)
+                    if not self._append_native_equation(paragraph, math_content):
+                        fallback_run = paragraph.add_run("[Equation unavailable]")
+                        fallback_run.font.italic = True
+                        fallback_run.font.color.rgb = RGBColor(128, 128, 128)
                 # Subscript <sub>...</sub>
                 elif part.startswith('<sub>') and part.endswith('</sub>'):
                     subscript_text = part[5:-6]  # Remove <sub></sub>
@@ -639,6 +787,60 @@ class WordExporter:
         while i < len(lines):
             line = lines[i]
             clean_line = line.strip()
+
+            # Display equation with stable metadata.
+            equation_match = re.fullmatch(
+                r'\s*\$\$(.*?)\$\$\s*<!--\s*equation:id=([^;]+);number=([^\s>]*)\s*-->\s*',
+                line,
+            )
+            if equation_match:
+                latex = equation_match.group(1).strip()
+                equation_id = equation_match.group(2).strip()
+                number = equation_match.group(3).strip() or None
+                self._add_display_equation(
+                    doc,
+                    latex,
+                    equation=equation_map.get(equation_id),
+                    number=number,
+                )
+                i += 1
+                continue
+
+            # Marker and user-authored Markdown may contain display math
+            # without pipeline metadata. Convert it through the same OMML path.
+            plain_display_match = re.fullmatch(r'\s*\$\$(.*?)\$\$\s*', line)
+            if plain_display_match:
+                self._add_display_equation(
+                    doc, plain_display_match.group(1).strip()
+                )
+                i += 1
+                continue
+            if clean_line == "$$":
+                display_lines = []
+                i += 1
+                while i < len(lines) and lines[i].strip() != "$$":
+                    display_lines.append(lines[i])
+                    i += 1
+                self._add_display_equation(doc, "\n".join(display_lines).strip())
+                i += int(i < len(lines))
+                continue
+
+            equation_image_match = re.fullmatch(
+                r'\s*!\[equation:\s*([^\]]+)\]\([^\)]+\)\s*'
+                r'<!--\s*equation:number=([^\s>]*)\s*-->\s*',
+                line,
+            )
+            if equation_image_match:
+                equation_id = equation_image_match.group(1).strip()
+                number = equation_image_match.group(2).strip() or None
+                self._add_display_equation(
+                    doc,
+                    None,
+                    equation=equation_map.get(equation_id),
+                    number=number,
+                )
+                i += 1
+                continue
                         
             # 1. Handle Table Logic
             if clean_line.startswith('|'):

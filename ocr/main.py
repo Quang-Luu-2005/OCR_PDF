@@ -227,6 +227,33 @@ def main():
         getattr(cfg, "USE_MARKER_FOR_DIGITAL_TRANSLATION", False)
         if cfg_loaded else False
     )
+    math_processing_enabled = str(
+        os.getenv(
+            "MATH_PROCESSING_ENABLED",
+            str(getattr(cfg, "MATH_PROCESSING_ENABLED", True) if cfg_loaded else True),
+        )
+    ).strip().lower() not in {"0", "false", "no", "off"}
+    math_vision_enabled = str(
+        os.getenv(
+            "MATH_VISION_ENABLED",
+            str(getattr(cfg, "MATH_VISION_ENABLED", True) if cfg_loaded else True),
+        )
+    ).strip().lower() not in {"0", "false", "no", "off"}
+    math_render_dpi = int(
+        os.getenv(
+            "MATH_RENDER_DPI",
+            str(getattr(cfg, "MATH_RENDER_DPI", 300) if cfg_loaded else 300),
+        )
+    )
+    math_min_confidence = float(
+        os.getenv(
+            "MATH_MIN_CONFIDENCE",
+            str(getattr(cfg, "MATH_MIN_CONFIDENCE", 0.90) if cfg_loaded else 0.90),
+        )
+    )
+    mml2omml_xsl_path = os.getenv("MML2OMML_XSL_PATH") or (
+        getattr(cfg, "MML2OMML_XSL_PATH", None) if cfg_loaded else None
+    )
 
     # Determine enable_preprocessing
     if args.no_preprocess:
@@ -260,6 +287,11 @@ def main():
         translation_model=translation_model,
         translation_base_url=translation_base_url,
         use_marker_for_digital_translation=use_marker_for_digital,
+        math_processing_enabled=math_processing_enabled,
+        math_vision_enabled=math_vision_enabled,
+        math_render_dpi=math_render_dpi,
+        math_min_confidence=math_min_confidence,
+        mml2omml_xsl_path=mml2omml_xsl_path,
     )
 
     mode = None if args.mode == "auto" else args.mode

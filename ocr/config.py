@@ -37,6 +37,14 @@ TRANSLATION_MAX_TOKENS = 12000
 # not auto-start Surya/vLLM/Docker. Set True only when Marker is configured.
 USE_MARKER_FOR_DIGITAL_TRANSLATION = False
 
+# Mathematical-expression extraction and Gemini Vision recognition
+MATH_PROCESSING_ENABLED = True
+MATH_VISION_ENABLED = True
+MATH_RENDER_DPI = 300
+MATH_MIN_CONFIDENCE = 0.90
+# Optional override. When empty, common Microsoft Office locations are searched.
+MML2OMML_XSL_PATH = ""
+
 # Logging Configuration
 LOG_LEVEL = logging.INFO         # Logging level
 LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'

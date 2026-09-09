@@ -81,6 +81,8 @@ class ScientificTranslatorTests(unittest.TestCase):
             "|---|---|\n"
             "| Accuracy | 95% |\n\n"
             "```python\nvalue = 10\n```\n"
+            "\n$$Z=\\frac{X-\\min(X)}{\\max(X)-\\min(X)}$$ "
+            "<!-- equation:id=eq_p003_001;number=1 -->\n"
         )
         completions = FakeCompletions()
         result = self.make_translator(completions).process(source, "Paper")
@@ -93,6 +95,8 @@ class ScientificTranslatorTests(unittest.TestCase):
             "$x=2$",
             "![id: paper_img_001](paper_img_001.png)",
             "```python\nvalue = 10\n```",
+            "$$Z=\\frac{X-\\min(X)}{\\max(X)-\\min(X)}$$ "
+            "<!-- equation:id=eq_p003_001;number=1 -->",
         ):
             self.assertEqual(source.count(protected), result.vi_markdown.count(protected))
         self.assertEqual(source.count("|"), result.vi_markdown.count("|"))

@@ -74,6 +74,11 @@ class ScientificTranslator:
         r"!\[[^\]]*\]\([^\)]+\)|\[IMAGE_PLACEHOLDER_\d+\]",
         re.IGNORECASE,
     )
+    _EQUATION_RE = re.compile(
+        r"\$\$[\s\S]*?\$\$\s*<!--\s*equation:[^>]+-->"
+        r"|!\[equation:\s*[^\]]+\]\([^\)]+\)\s*<!--\s*equation:[^>]+-->",
+        re.IGNORECASE,
+    )
     _NUMBER_RE = re.compile(
         r"(?<![\w])[-+]?\d+(?:[.,]\d+)*(?:\s*[-–]\s*\d+(?:[.,]\d+)*)?%?"
     )
@@ -271,6 +276,11 @@ class ScientificTranslator:
             raise TranslationValidationError("Corrected Markdown changed table structure.")
         if translated.count("|") != markdown.count("|"):
             raise TranslationValidationError("Vietnamese Markdown changed table structure.")
+        expected_equations = self._EQUATION_RE.findall(markdown)
+        if self._EQUATION_RE.findall(corrected) != expected_equations:
+            raise TranslationValidationError("Corrected Markdown changed equations.")
+        if self._EQUATION_RE.findall(translated) != expected_equations:
+            raise TranslationValidationError("Vietnamese Markdown changed equations.")
 
         return TranslationResult(corrected, translated, glossary, usage)
 
@@ -684,6 +694,8 @@ class ScientificTranslator:
         if re.search(r"\b(?:email|e-mail|Present address):", stripped, re.IGNORECASE):
             return True
         if cls._IMAGE_RE.fullmatch(stripped):
+            return True
+        if cls._EQUATION_RE.fullmatch(stripped):
             return True
         if cls._TABLE_SEPARATOR_RE.fullmatch(stripped):
             return True

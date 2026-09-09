@@ -61,6 +61,17 @@ class PipelineMetrics:
                 'glossary_terms': 0,
                 'outputs': {}
             },
+            'math': {
+                'enabled': False,
+                'model': None,
+                'total': 0,
+                'omml': 0,
+                'image_fallback': 0,
+                'api_calls': 0,
+                'cache_hits': 0,
+                'retries': 0,
+                'total_tokens': 0,
+            },
             'errors': []                       # danh sách lỗi
         }
     
@@ -193,6 +204,32 @@ class PipelineMetrics:
             'outputs': outputs or {},
         }
     
+    def set_math_metrics(
+        self,
+        *,
+        enabled: bool,
+        model: Optional[str] = None,
+        total: int = 0,
+        omml: int = 0,
+        image_fallback: int = 0,
+        api_calls: int = 0,
+        cache_hits: int = 0,
+        retries: int = 0,
+        total_tokens: int = 0,
+    ):
+        """Record mathematical-expression extraction and export metrics."""
+        self.metrics['math'] = {
+            'enabled': bool(enabled),
+            'model': model,
+            'total': int(total),
+            'omml': int(omml),
+            'image_fallback': int(image_fallback),
+            'api_calls': int(api_calls),
+            'cache_hits': int(cache_hits),
+            'retries': int(retries),
+            'total_tokens': int(total_tokens),
+        }
+
     def get_metrics_summary(self) -> Dict[str, Any]:
         """Get the current metrics summary"""
         return self.metrics.copy()
@@ -245,6 +282,16 @@ class PipelineMetrics:
             for label, path in translation.get('outputs', {}).items():
                 lines.append(f"   • {label}: {path}")
         
+        math_metrics = metrics.get('math', {})
+        lines.append("\nMathematical expressions:")
+        lines.append(f"   - Enabled: {math_metrics.get('enabled', False)}")
+        if math_metrics.get('enabled'):
+            lines.append(f"   - Detected: {math_metrics.get('total', 0)}")
+            lines.append(f"   - Native Word equations: {math_metrics.get('omml', 0)}")
+            lines.append(f"   - Image fallbacks: {math_metrics.get('image_fallback', 0)}")
+            lines.append(f"   - Vision API calls: {math_metrics.get('api_calls', 0)}")
+            lines.append(f"   - Cache hits: {math_metrics.get('cache_hits', 0)}")
+
         # Files processed
         if metrics['files_processed']:
             lines.append(f"\nFiles Processed:")

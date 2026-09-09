@@ -34,8 +34,8 @@ class DummyDigitalParser:
 class DummyExporter:
     calls = []
 
-    def markdown_to_word(self, markdown, output_path, images=None):
-        self.calls.append((markdown, Path(output_path), images or []))
+    def markdown_to_word(self, markdown, output_path, images=None, equations=None):
+        self.calls.append((markdown, Path(output_path), images or [], equations or []))
         Path(output_path).write_bytes(b"word-with-image")
         return output_path
 

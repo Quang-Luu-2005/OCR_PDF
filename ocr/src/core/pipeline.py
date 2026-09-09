@@ -4,6 +4,7 @@
 from __future__ import annotations
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -17,6 +18,7 @@ from .ocr_engine import OCREngine
 from ..export.exporter import WordExporter
 from ..processing.markdown_processor import MarkdownProcessor
 from ..processing.scientific_translator import ScientificTranslator, TranslationResult
+from ..processing.math_expression_processor import MathExpressionProcessor, EquationRecord
 from ..utils.metrics import PipelineMetrics
  
 
@@ -47,6 +49,12 @@ class OCRPipeline:
         translation_base_url: Optional[str] = None,
         translator: Optional[Any] = None,
         use_marker_for_digital_translation: bool = False,
+        math_processing_enabled: bool = True,
+        math_vision_enabled: bool = True,
+        math_render_dpi: int = 300,
+        math_min_confidence: float = 0.90,
+        math_processor: Optional[Any] = None,
+        mml2omml_xsl_path: Optional[str | Path] = None,
     ):
         """
         Initialize OCR Pipeline
@@ -72,6 +80,7 @@ class OCRPipeline:
         self.use_llm_correction = use_llm_correction
         self.enable_vi_translation = enable_vi_translation
         self.use_marker_for_digital_translation = use_marker_for_digital_translation
+        self.math_processing_enabled = bool(math_processing_enabled)
         # Maximum number of worker threads for page-level parallelism.
         # If None, defaults to number of CPUs.
         self.max_workers: Optional[int] = None
@@ -97,13 +106,53 @@ class OCRPipeline:
             configured_cache = getattr(self.translator, "cache_dir", None)
             if configured_cache:
                 self.translation_cache_root = Path(configured_cache)
+
+        math_cache = Path(__file__).resolve().parents[2] / "artifacts" / "equations"
+        math_client = getattr(self.translator, "client", None)
+        if math_client is None and math_vision_enabled:
+            api_key = os.getenv("TRANSLATION_API_KEY") or os.getenv("GEMINI_API_KEY")
+            if api_key:
+                try:
+                    from openai import OpenAI
+
+                    math_client = OpenAI(
+                        api_key=api_key,
+                        base_url=(
+                            translation_base_url
+                            or os.getenv("TRANSLATION_API_BASE")
+                            or ScientificTranslator.DEFAULT_BASE_URL
+                        ),
+                        timeout=float(os.getenv("TRANSLATION_TIMEOUT_SECONDS", "120")),
+                    )
+                except ImportError:
+                    logger.warning("OpenAI SDK is unavailable; equations will use image fallback.")
+        self.math_processor = math_processor or MathExpressionProcessor(
+            client=math_client,
+            model=(
+                translation_model
+                or os.getenv("TRANSLATION_MODEL")
+                or ScientificTranslator.DEFAULT_MODEL
+            ),
+            output_dir=self.output_dir / "extracted_equations",
+            cache_dir=math_cache,
+            enabled=self.math_processing_enabled,
+            vision_enabled=math_vision_enabled,
+            render_dpi=math_render_dpi,
+            min_confidence=math_min_confidence,
+            max_retries=int(os.getenv("TRANSLATION_MAX_RETRIES", "3")),
+            timeout_seconds=float(os.getenv("TRANSLATION_TIMEOUT_SECONDS", "120")),
+        )
         
         # Initialize modules
         self.digital_parser = DigitalParser()
         self.pdf_converter = PDFConverter(dpi=dpi)
         # self.preprocessor = Preprocessor(output_dir=Path(temp_dir) / "preprocessed")
         self.ocr_engine = OCREngine(output_dir=Path(temp_dir) / "craft_output")
-        self.exporter = WordExporter()
+        self.exporter = (
+            WordExporter(mml2omml_xsl_path=mml2omml_xsl_path)
+            if mml2omml_xsl_path
+            else WordExporter()
+        )
         self.markdown_processor = MarkdownProcessor(
             # Gemini performs the English OCR correction when translation is on.
             use_llm_correction=use_llm_correction and not enable_vi_translation
@@ -117,6 +166,7 @@ class OCRPipeline:
             model=getattr(self.translator, "model", translation_model),
             base_url=getattr(self.translator, "base_url", translation_base_url),
         )
+        self.metrics.set_math_metrics(enabled=self.math_processing_enabled)
         
     
     def process_pdf(
@@ -215,6 +265,12 @@ class OCRPipeline:
         prefer_digital_fallback: bool = False,
     ) -> None:
         """Extract structured Markdown, translate it and build image-aware Word files."""
+        self.math_processor.reset()
+        source_key = sha256(str(pdf_path.resolve()).encode("utf-8")).hexdigest()[:16]
+        if getattr(self.math_processor, "cache_dir", None):
+            cache_root = Path(__file__).resolve().parents[2] / "artifacts" / "equations"
+            self.math_processor.cache_dir = cache_root / source_key
+            self.math_processor.cache_dir.mkdir(parents=True, exist_ok=True)
         if prefer_digital_fallback:
             logger.info("Using PyMuPDF for digital PDF; Marker/Docker is disabled.")
             marker_result = self._extract_digital_markdown_fallback(pdf_path)
@@ -232,6 +288,7 @@ class OCRPipeline:
         organized_images = self._organize_extracted_images(
             marker_result.get('images', []), pdf_path
         )
+        equations: List[EquationRecord] = marker_result.get("equations", [])
         self.metrics.add_images_extracted([img['output_path'] for img in organized_images])
 
         processed_markdown = self.markdown_processor.process(
@@ -244,7 +301,6 @@ class OCRPipeline:
                 raise RuntimeError("Vietnamese translation is enabled but no translator is configured.")
 
             # Isolate checkpoints per source document while retaining content-hash reuse.
-            source_key = sha256(str(pdf_path.resolve()).encode("utf-8")).hexdigest()[:16]
             if self.translation_cache_root:
                 self.translator.cache_dir = self.translation_cache_root / source_key
                 self.translator.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -257,11 +313,13 @@ class OCRPipeline:
             vi_markdown_path = self.output_dir / f"{pdf_path.stem}_ocr_results_vi.md"
             vi_docx_path = self.output_dir / f"{pdf_path.stem}_ocr_results_vi.docx"
             self._atomic_write_text(vi_markdown_path, result.vi_markdown)
-            self._atomic_export_word(result.vi_markdown, vi_docx_path, organized_images)
+            self._atomic_export_word(
+                result.vi_markdown, vi_docx_path, organized_images, equations
+            )
 
             if english_docx_path is not None:
                 self._atomic_export_word(
-                    result.corrected_markdown, english_docx_path, organized_images
+                    result.corrected_markdown, english_docx_path, organized_images, equations
                 )
 
             self.output_artifacts.update({
@@ -286,7 +344,9 @@ class OCRPipeline:
         else:
             self._atomic_write_text(markdown_path, processed_markdown)
             if english_docx_path is not None:
-                self._atomic_export_word(processed_markdown, english_docx_path, organized_images)
+                self._atomic_export_word(
+                    processed_markdown, english_docx_path, organized_images, equations
+                )
             self.output_artifacts["markdown"] = markdown_path
 
         self.metrics.set_line_count(len(processed_markdown.split('\n')))
@@ -296,6 +356,22 @@ class OCRPipeline:
         self.metrics.set_output_files_size(
             markdown_path=markdown_path,
             docx_path=english_docx_path,
+        )
+        if equations:
+            equations_index_path = self.output_dir / "equations_index.json"
+            self.math_processor.save_index(equations_index_path, pdf_path)
+            self.output_artifacts["equations_index"] = equations_index_path
+        math_usage = getattr(self.math_processor, "usage", None)
+        self.metrics.set_math_metrics(
+            enabled=self.math_processing_enabled,
+            model=getattr(self.math_processor, "model", None),
+            total=len(equations),
+            omml=sum(equation.output_mode == "omml" for equation in equations),
+            image_fallback=sum(equation.output_mode == "image" for equation in equations),
+            api_calls=getattr(math_usage, "api_calls", 0),
+            cache_hits=getattr(math_usage, "cache_hits", 0),
+            retries=getattr(math_usage, "retries", 0),
+            total_tokens=getattr(math_usage, "total_tokens", 0),
         )
 
     def _extract_digital_markdown_fallback(self, pdf_path: Path) -> Dict[str, Any]:
@@ -315,6 +391,7 @@ class OCRPipeline:
 
         markdown_parts: List[str] = []
         images: List[Dict[str, Any]] = []
+        equations: List[EquationRecord] = []
         document = fitz.open(str(pdf_path))
         try:
             for page_number, page in enumerate(document, start=1):
@@ -322,6 +399,15 @@ class OCRPipeline:
                 page_items: List[tuple[float, float, str]] = []
                 table_block_indexes, table_markdown = self._extract_pdf_table(blocks)
                 raster_figures = self._find_vector_figures(page, blocks)
+                page_equations = self.math_processor.extract_page(
+                    page, page_number, blocks, pdf_path.stem
+                )
+                equation_block_indexes = {
+                    index
+                    for equation in page_equations
+                    for index in equation.consumed_block_indexes
+                }
+                equations.extend(page_equations)
                 if table_markdown:
                     table_y = min(blocks[index][1] for index in table_block_indexes)
                     table_x = min(blocks[index][0] for index in table_block_indexes)
@@ -330,6 +416,7 @@ class OCRPipeline:
                 for block_index, block in enumerate(blocks):
                     if (
                         block_index in table_block_indexes
+                        or block_index in equation_block_indexes
                         or len(block) < 5
                         or not block[4].strip()
                         or any(
@@ -339,6 +426,11 @@ class OCRPipeline:
                     ):
                         continue
                     page_items.append((block[1], block[0], block[4].strip()))
+
+                for equation in page_equations:
+                    page_items.append(
+                        (equation.bbox[1], equation.bbox[0], equation.markdown)
+                    )
 
                 # Figures 1, 2 and 5 are vector artwork in the PDF rather
                 # than raster image XObjects. Render those regions so the
@@ -426,9 +518,13 @@ class OCRPipeline:
             index_path,
             json.dumps(index_data, indent=2, ensure_ascii=False),
         )
+        equations_index_path = self.output_dir / "equations_index.json"
+        self.math_processor.save_index(equations_index_path, pdf_path)
+        self.output_artifacts["equations_index"] = equations_index_path
         return {
             "markdown": "\n\n".join(markdown_parts),
             "images": images,
+            "equations": equations,
         }
 
     @staticmethod
@@ -638,11 +734,14 @@ class OCRPipeline:
         markdown: str,
         output_path: Path,
         images: List[Dict[str, Any]],
+        equations: Optional[List[EquationRecord]] = None,
     ) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = output_path.with_name(output_path.stem + ".tmp" + output_path.suffix)
         try:
-            self.exporter.markdown_to_word(markdown, str(temp_path), images=images)
+            self.exporter.markdown_to_word(
+                markdown, str(temp_path), images=images, equations=equations
+            )
             temp_path.replace(output_path)
         finally:
             if temp_path.exists():
